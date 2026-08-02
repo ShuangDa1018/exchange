@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BTC-USDT Exchange</title>
+  <style>
+    :root {
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --ink: #14212b;
+      --muted: #6b7a86;
+      --line: #d9e0e6;
+      --buy: #0a7a52;
+      --sell: #c23b2e;
+      --buy-soft: #e7f6ef;
+      --sell-soft: #fdeceb;
+      --accent: #1f4b63;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+      background:
+        linear-gradient(180deg, #e8eef2 0%, transparent 220px),
+        var(--bg);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      padding: 28px 24px 12px;
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      letter-spacing: -0.03em;
+    }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .user-switch {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      font-size: 13px;
+    }
+    select, input, button {
+      font: inherit;
+    }
+    select, input {
+      height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: #fff;
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 12px 24px 48px;
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 14px;
+    }
+    @media (max-width: 860px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .balances {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      font-size: 14px;
+    }
+    .balances b { font-variant-numeric: tabular-nums; }
+    .book {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 500;
+      padding: 4px 0;
+    }
+    td { padding: 5px 0; }
+    .bid td:first-child { color: var(--buy); }
+    .ask td:first-child { color: var(--sell); }
+    form.trade {
+      display: grid;
+      gap: 10px;
+    }
+    .sides {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .sides button {
+      height: 40px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+    }
+    .sides button.active.buy {
+      background: var(--buy-soft);
+      border-color: var(--buy);
+      color: var(--buy);
+    }
+    .sides button.active.sell {
+      background: var(--sell-soft);
+      border-color: var(--sell);
+      color: var(--sell);
+    }
+    label {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .submit {
+      height: 42px;
+      border: 0;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      background: var(--accent);
+    }
+    .submit.buy { background: var(--buy); }
+    .submit.sell { background: var(--sell); }
+    .orders li, .trades li {
+      list-style: none;
+      display: grid;
+      grid-template-columns: 64px 1fr auto;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+    }
+    .orders ul, .trades ul { margin: 0; padding: 0; }
+    .tag-buy { color: var(--buy); }
+    .tag-sell { color: var(--sell); }
+    .ghost {
+      height: 30px;
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .err {
+      color: var(--sell);
+      font-size: 13px;
+      min-height: 18px;
+    }
+    .span2 { grid-column: 1 / -1; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>BTC-USDT</h1>
+      <div class="sub">基础现货交易所 · 限价撮合 · 内存账本</div>
+    </div>
+    <div class="user-switch">
+      <span>当前用户</span>
+      <select id="user">
+        <option value="alice">alice</option>
+        <option value="bob">bob</option>
+      </select>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel span2">
+      <h2>余额</h2>
+      <div class="balances" id="balances">加载中…</div>
+    </section>
+
+    <section class="panel">
+      <h2>订单簿</h2>
+      <div class="book">
+        <div>
+          <table>
+            <thead><tr><th>买价</th><th>数量</th></tr></thead>
+            <tbody id="bids"></tbody>
+          </table>
+        </div>
+        <div>
+          <table>
+            <thead><tr><th>卖价</th><th>数量</th></tr></thead>
+            <tbody id="asks"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>下单</h2>
+      <form class="trade" id="order-form">
+        <div class="sides">
+          <button type="button" class="active buy" data-side="buy">买入</button>
+          <button type="button" class="sell" data-side="sell">卖出</button>
+        </div>
+        <label>价格 (USDT)
+          <input id="price" type="number" step="0.01" min="0" value="100" required />
+        </label>
+        <label>数量 (BTC)
+          <input id="qty" type="number" step="0.0001" min="0" value="0.1" required />
+        </label>
+        <button class="submit buy" id="submit" type="submit">买入 BTC</button>
+        <div class="err" id="err"></div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>我的挂单</h2>
+      <div class="orders"><ul id="orders"></ul></div>
+    </section>
+
+    <section class="panel">
+      <h2>最近成交</h2>
+      <div class="trades"><ul id="trades"></ul></div>
+    </section>
+  </main>
+
+  <script>
+    const API = "";
+    let side = "buy";
+
+    const $ = (id) => document.getElementById(id);
+    const user = () => $("user").value;
+
+    async function api(path, options = {}) {
+      const res = await fetch(API + path, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          "X-User-Id": user(),
+          ...(options.headers || {}),
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "请求失败");
+      return data;
+    }
+
+    function money(n) {
+      return Number(n).toLocaleString(undefined, { maximumFractionDigits: 8 });
+    }
+
+    async function refresh() {
+      const [balances, book, orders, trades] = await Promise.all([
+        api("/api/balances"),
+        api("/api/book?depth=8"),
+        api("/api/orders"),
+        api("/api/trades?limit=12"),
+      ]);
+
+      $("balances").innerHTML = Object.keys(balances).length
+        ? Object.entries(balances).map(([asset, b]) =>
+            `<div><div>${asset}</div><b>${money(b.available)}</b> <span style="color:var(--muted)">可用</span>
+             · <b>${money(b.locked)}</b> <span style="color:var(--muted)">冻结</span></div>`
+          ).join("")
+        : "暂无余额";
+
+      $("bids").innerHTML = (book.bids || []).map((l) =>
+        `<tr class="bid"><td>${money(l.price)}</td><td>${money(l.quantity)}</td></tr>`
+      ).join("") || `<tr><td colspan="2" style="color:var(--muted)">暂无</td></tr>`;
+
+      $("asks").innerHTML = (book.asks || []).map((l) =>
+        `<tr class="ask"><td>${money(l.price)}</td><td>${money(l.quantity)}</td></tr>`
+      ).join("") || `<tr><td colspan="2" style="color:var(--muted)">暂无</td></tr>`;
+
+      $("orders").innerHTML = orders.length
+        ? orders.map((o) => `
+          <li>
+            <span class="${o.side === "buy" ? "tag-buy" : "tag-sell"}">${o.side}</span>
+            <span>#${o.id} ${money(o.price)} × ${money(o.quantity - o.filled)} 剩余</span>
+            <button class="ghost" data-cancel="${o.id}">撤单</button>
+          </li>`).join("")
+        : `<li style="color:var(--muted);display:block">暂无挂单</li>`;
+
+      $("trades").innerHTML = trades.length
+        ? [...trades].reverse().map((t) => `
+          <li>
+            <span>${money(t.price)}</span>
+            <span>${money(t.quantity)} BTC</span>
+            <span style="color:var(--muted)">#${t.id}</span>
+          </li>`).join("")
+        : `<li style="color:var(--muted);display:block">暂无成交</li>`;
+    }
+
+    document.querySelectorAll(".sides button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        side = btn.dataset.side;
+        document.querySelectorAll(".sides button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        const submit = $("submit");
+        submit.textContent = side === "buy" ? "买入 BTC" : "卖出 BTC";
+        submit.className = `submit ${side}`;
+      });
+    });
+
+    $("order-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("err").textContent = "";
+      try {
+        await api("/api/orders", {
+          method: "POST",
+          body: JSON.stringify({
+            side,
+            price: Number($("price").value),
+            quantity: Number($("qty").value),
+          }),
+        });
+        await refresh();
+      } catch (err) {
+        $("err").textContent = err.message;
+      }
+    });
+
+    $("orders").addEventListener("click", async (e) => {
+      const id = e.target.dataset.cancel;
+      if (!id) return;
+      try {
+        await api(`/api/orders/${id}`, { method: "DELETE" });
+        await refresh();
+      } catch (err) {
+        $("err").textContent = err.message;
+      }
+    });
+
+    $("user").addEventListener("change", () => refresh().catch(console.error));
+    refresh().catch((err) => { $("err").textContent = err.message; });
+    setInterval(() => refresh().catch(() => {}), 2000);
+  </script>
+</body>
+</html>
