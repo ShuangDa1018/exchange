@@ -250,21 +250,28 @@
   </main>
 
   <script>
-    const API = "";
+    // Live Server(5500) / 直接打开 HTML 时，请求打到 Go 后端 8080
+    // 若用 go run . 打开 http://localhost:8080，同源也可以
+    const API = "http://localhost:8080";
     let side = "buy";
 
     const $ = (id) => document.getElementById(id);
     const user = () => $("user").value;
 
     async function api(path, options = {}) {
-      const res = await fetch(API + path, {
-        ...options,
-        headers: {
-          "Content-Type": "application/json",
-          "X-User-Id": user(),
-          ...(options.headers || {}),
-        },
-      });
+      let res;
+      try {
+        res = await fetch(API + path, {
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            "X-User-Id": user(),
+            ...(options.headers || {}),
+          },
+        });
+      } catch {
+        throw new Error("无法连接后端，请先执行：cd exchange && go run .");
+      }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "请求失败");
       return data;
