@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Go CRUD Demo</title>
+  <style>
+    :root {
+      --bg: #f5f3ef;
+      --ink: #1a1a1a;
+      --muted: #6b6b6b;
+      --line: #ddd8ce;
+      --accent: #0f6e56;
+      --danger: #b42318;
+      --card: #fffdf9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+      background:
+        radial-gradient(circle at 10% 0%, #e8f2ee 0%, transparent 40%),
+        radial-gradient(circle at 90% 10%, #f7efe6 0%, transparent 35%),
+        var(--bg);
+      color: var(--ink);
+      min-height: 100vh;
+    }
+    main {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 48px 20px 80px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+    }
+    .sub {
+      margin: 0 0 28px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    form {
+      display: flex;
+      gap: 10px;
+    }
+    input[type="text"] {
+      flex: 1;
+      height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0 12px;
+      font-size: 15px;
+      background: #fff;
+    }
+    button {
+      height: 42px;
+      border: 0;
+      border-radius: 10px;
+      padding: 0 16px;
+      font-size: 14px;
+      cursor: pointer;
+      background: var(--accent);
+      color: #fff;
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--ink);
+      border: 1px solid var(--line);
+    }
+    button.danger {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid #f0c9c5;
+    }
+    ul {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    li {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 4px;
+      border-bottom: 1px solid var(--line);
+    }
+    li:last-child { border-bottom: 0; }
+    li.done .title {
+      text-decoration: line-through;
+      color: var(--muted);
+    }
+    .title {
+      flex: 1;
+      font-size: 15px;
+    }
+    .id {
+      color: var(--muted);
+      font-size: 12px;
+      min-width: 28px;
+    }
+    .actions {
+      display: flex;
+      gap: 6px;
+    }
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 24px 0;
+      font-size: 14px;
+    }
+    .hint {
+      margin-top: 18px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    code {
+      background: #eeeae3;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>增删改查 Demo</h1>
+    <p class="sub">Go 标准库 + 内存存储，本地可直接体验 CRUD</p>
+
+    <div class="panel">
+      <form id="create-form">
+        <input id="title" type="text" placeholder="输入待办标题，回车新增" required />
+        <button type="submit">新增</button>
+      </form>
+    </div>
+
+    <div class="panel">
+      <ul id="list"></ul>
+    </div>
+
+    <p class="hint">
+      API：<code>POST/GET/PUT/DELETE /api/todos</code><br />
+      页面：<code>http://localhost:8080</code>
+    </p>
+  </main>
+
+  <script>
+    // 无论用 go run / Live Server / 直接打开 HTML，都请求 Go 后端
+    const API_BASE = "http://localhost:8080";
+    const listEl = document.getElementById("list");
+    const form = document.getElementById("create-form");
+    const titleInput = document.getElementById("title");
+
+    async function api(path, options) {
+      let res;
+      try {
+        res = await fetch(API_BASE + path, {
+          headers: { "Content-Type": "application/json" },
+          ...options,
+        });
+      } catch {
+        throw new Error("无法连接后端，请先在项目目录执行：go run .");
+      }
+      if (res.status === 204) return null;
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        throw new Error("无法连接后端，请先在项目目录执行：go run .");
+      }
+      if (!res.ok) throw new Error((data && data.error) || "请求失败");
+      return data;
+    }
+
+    async function load() {
+      const todos = await api("/api/todos");
+      todos.sort((a, b) => a.id - b.id);
+      if (!todos.length) {
+        listEl.innerHTML = '<li class="empty">暂无数据，先新增一条吧</li>';
+        return;
+      }
+      listEl.innerHTML = todos.map((t) => `
+        <li class="${t.done ? "done" : ""}" data-id="${t.id}">
+          <span class="id">#${t.id}</span>
+          <span class="title">${escapeHtml(t.title)}</span>
+          <div class="actions">
+            <button class="ghost" data-action="toggle">${t.done ? "标为未完成" : "标为完成"}</button>
+            <button class="ghost" data-action="edit">编辑</button>
+            <button class="danger" data-action="delete">删除</button>
+          </div>
+        </li>
+      `).join("");
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const title = titleInput.value.trim();
+      if (!title) return;
+      try {
+        await api("/api/todos", { method: "POST", body: JSON.stringify({ title }) });
+        titleInput.value = "";
+        await load();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    listEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+      const li = btn.closest("li");
+      const id = li.dataset.id;
+      const action = btn.dataset.action;
+      const title = li.querySelector(".title").textContent;
+      const done = li.classList.contains("done");
+
+      try {
+        if (action === "delete") {
+          await api(`/api/todos/${id}`, { method: "DELETE" });
+        } else if (action === "toggle") {
+          await api(`/api/todos/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({ title, done: !done }),
+          });
+        } else if (action === "edit") {
+          const next = prompt("修改标题", title);
+          if (next == null || !next.trim()) return;
+          await api(`/api/todos/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({ title: next.trim(), done }),
+          });
+        }
+        await load();
+      } catch (err) {
+        alert(err.message);
+      }
+    });
+
+    load().catch((err) => {
+      listEl.innerHTML = `<li class="empty">${escapeHtml(err.message)}</li>`;
+    });
+  </script>
+</body>
+</html>

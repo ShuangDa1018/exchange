@@ -270,7 +270,7 @@
           },
         });
       } catch {
-        throw new Error("无法连接后端，请先执行：go run .");
+        throw new Error("无法连接后端，请先执行：cd exchange && go run .");
       }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "请求失败");
