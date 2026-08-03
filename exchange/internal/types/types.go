@@ -1,7 +1,10 @@
+// Package types：共享的数据类型（≈ 前端的 types.ts / interfaces）
 package types
 
 import "time"
 
+// Side 用自定义 string 类型，限制只能是 buy/sell
+// ≈ type Side = 'buy' | 'sell'
 type Side string
 
 const (
@@ -9,33 +12,37 @@ const (
 	SideSell Side = "sell"
 )
 
+// OrderStatus ≈ type OrderStatus = 'open' | 'partial' | 'filled' | 'cancelled'
 type OrderStatus string
 
 const (
-	StatusOpen      OrderStatus = "open"
-	StatusPartial   OrderStatus = "partial"
-	StatusFilled    OrderStatus = "filled"
-	StatusCancelled OrderStatus = "cancelled"
+	StatusOpen      OrderStatus = "open"      // 挂着，还没成交
+	StatusPartial   OrderStatus = "partial"   // 部分成交
+	StatusFilled    OrderStatus = "filled"    // 全部成交
+	StatusCancelled OrderStatus = "cancelled" // 已撤单
 )
 
-// Order 限价单
+// Order 限价单 ≈ interface Order { ... }
+// 字段大写开头才能被 JSON 导出；`json:"xxx"` 决定前端看到的字段名
 type Order struct {
 	ID        int64       `json:"id"`
 	UserID    string      `json:"user_id"`
-	Symbol    string      `json:"symbol"` // 如 BTC-USDT
-	Side      Side        `json:"side"`
-	Price     float64     `json:"price"`
-	Quantity  float64     `json:"quantity"` // 原始数量
+	Symbol    string      `json:"symbol"`   // 交易对，如 BTC-USDT
+	Side      Side        `json:"side"`     // buy / sell
+	Price     float64     `json:"price"`    // 限价
+	Quantity  float64     `json:"quantity"` // 原始下单数量
 	Filled    float64     `json:"filled"`   // 已成交数量
 	Status    OrderStatus `json:"status"`
 	CreatedAt time.Time   `json:"created_at"`
 }
 
+// Remaining 剩余未成交量
+// (o *Order) 是方法接收者 ≈ class Order { remaining() { ... } }
 func (o *Order) Remaining() float64 {
 	return o.Quantity - o.Filled
 }
 
-// Trade 成交记录
+// Trade 一笔成交记录（买卖双方配对成功后产生）
 type Trade struct {
 	ID        int64     `json:"id"`
 	Symbol    string    `json:"symbol"`
@@ -48,15 +55,15 @@ type Trade struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// BookLevel 订单簿一档
+// BookLevel 订单簿的一档：同一价格汇总后的量
 type BookLevel struct {
 	Price    float64 `json:"price"`
 	Quantity float64 `json:"quantity"`
 }
 
-// OrderBookSnapshot 盘口快照
+// OrderBookSnapshot 盘口快照（前端订单簿直接渲染这个）
 type OrderBookSnapshot struct {
 	Symbol string      `json:"symbol"`
-	Bids   []BookLevel `json:"bids"` // 买盘，价格从高到低
-	Asks   []BookLevel `json:"asks"` // 卖盘，价格从低到高
+	Bids   []BookLevel `json:"bids"` // 买盘：价格从高到低
+	Asks   []BookLevel `json:"asks"` // 卖盘：价格从低到高
 }
