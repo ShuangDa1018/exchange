@@ -1,5 +1,5 @@
 // 入口文件：组装各模块并启动 HTTP 服务
-// 运行：cd exchange && go run .
+// 运行：go run .
 package main
 
 import (
