@@ -54,16 +54,3 @@ type Trade struct {
 	SellerID  string    `json:"seller_id"`
 	CreatedAt time.Time `json:"created_at"`
 }
-
-// BookLevel 订单簿的一档：同一价格汇总后的量
-type BookLevel struct {
-	Price    float64 `json:"price"`
-	Quantity float64 `json:"quantity"`
-}
-
-// OrderBookSnapshot 盘口快照（前端订单簿直接渲染这个）
-type OrderBookSnapshot struct {
-	Symbol string      `json:"symbol"`
-	Bids   []BookLevel `json:"bids"` // 买盘：价格从高到低
-	Asks   []BookLevel `json:"asks"` // 卖盘：价格从低到高
-}

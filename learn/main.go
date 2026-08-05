@@ -4,9 +4,11 @@ import (
 	"encoding/json" // 相当于 JSON.parse / JSON.stringify
 	"embed"         // 把静态文件“打包进”二进制，类似 webpack 内联资源
 	"fmt"           // 打印：Println / Printf
+	"io"            // io.ReadAll：一次读完文件内容
 	"io/fs"
 	"log"
 	"net/http" // 内置 HTTP 服务器，不用 Express
+	"os"       // 打开/读本地文件
 	"strconv"
 	"sync" // 锁，多请求同时改内存数据时防脏写（前端一般遇不到）
 	"time"
@@ -244,7 +246,31 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// demoReadFile 练习读本地文件（和 CRUD 无关，启动时跑一次看看输出）
+func demoReadFile(path string) {
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		fmt.Println("文件不存在:", path)
+		return
+	}
+	if err != nil {
+		fmt.Println("文件访问异常:", err)
+		return
+	}
+	defer file.Close() // 函数返回前关掉句柄，≈ finally 里 close
+
+	data, err := io.ReadAll(file) // []byte，类似 Buffer / Uint8Array
+	if err != nil {
+		fmt.Println("读取失败:", err)
+		return
+	}
+	fmt.Println("文件读取成功:")
+	fmt.Println(string(data)) // []byte → string 才能当文字打印
+}
+
 func main() {
+	demoReadFile("README.txt") // 试试改成 "nope.txt" 看“文件不存在”
+
 	addr := ":8080" // 前面省略 host，表示监听所有网卡的 8080
 	server := NewServer(NewStore())
 

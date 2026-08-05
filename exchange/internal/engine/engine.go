@@ -20,12 +20,12 @@ type Engine struct {
 	base    string // 基础币 BTC（你买卖的东西）
 	quote   string // 计价币 USDT（用什么付钱）
 	ledger  *account.Ledger
-	bids    []*types.Order          // 买盘数组（slice ≈ JS Array）
-	asks    []*types.Order          // 卖盘数组
-	orders  map[int64]*types.Order  // 所有订单索引 id -> order
-	trades  []*types.Trade          // 成交历史
-	nextOID int64                   // 订单自增 ID
-	nextTID int64                   // 成交自增 ID
+	bids    []*types.Order         // 买盘数组（slice ≈ JS Array）
+	asks    []*types.Order         // 卖盘数组
+	orders  map[int64]*types.Order // 所有订单索引 id -> order
+	trades  []*types.Trade         // 成交历史
+	nextOID int64                  // 订单自增 ID
+	nextTID int64                  // 成交自增 ID
 }
 
 // New 创建引擎 ≈ new Engine({ symbol, base, quote, ledger })
@@ -153,14 +153,27 @@ func (e *Engine) RecentTrades(limit int) []*types.Trade {
 	return cloneTrades(e.trades[start:]) // slice[start:] ≈ arr.slice(start)
 }
 
+// BookLevel 订单簿的一档：同一价格汇总后的量
+type BookLevel struct {
+	Price    float64 `json:"price"`
+	Quantity float64 `json:"quantity"`
+}
+
+// OrderBookSnapshot 盘口快照（前端订单簿直接渲染这个）
+type OrderBookSnapshot struct {
+	Symbol string      `json:"symbol"`
+	Bids   []BookLevel `json:"bids"` // 买盘：价格从高到低
+	Asks   []BookLevel `json:"asks"` // 卖盘：价格从低到高
+}
+
 // Snapshot 盘口深度快照（给前端订单簿）
-func (e *Engine) Snapshot(depth int) types.OrderBookSnapshot {
+func (e *Engine) Snapshot(depth int) OrderBookSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if depth <= 0 {
 		depth = 10
 	}
-	return types.OrderBookSnapshot{
+	return OrderBookSnapshot{
 		Symbol: e.symbol,
 		Bids:   aggregate(e.bids, depth),
 		Asks:   aggregate(e.asks, depth),
@@ -246,7 +259,8 @@ func (e *Engine) rest(order *types.Order) {
 	}
 }
 
-func (e *Engine) removeFromBook(order *types.Order) {
+func (e *Engine) removeFromBook(order *types.Order) 
+{
 	if order.Side == types.SideBuy {
 		e.bids = filterOut(e.bids, order.ID)
 	} else {
@@ -290,8 +304,8 @@ func filterOut(book []*types.Order, id int64) []*types.Order {
 }
 
 // aggregate 把同一价格的挂单数量合并成一档（前端订单簿展示用）
-func aggregate(book []*types.Order, depth int) []types.BookLevel {
-	levels := make([]types.BookLevel, 0, depth)
+func aggregate(book []*types.Order, depth int) []BookLevel {
+	levels := make([]BookLevel, 0, depth)
 	for _, o := range book {
 		if o.Remaining() <= 0 {
 			continue
@@ -304,7 +318,7 @@ func aggregate(book []*types.Order, depth int) []types.BookLevel {
 		if len(levels) >= depth {
 			break
 		}
-		levels = append(levels, types.BookLevel{Price: o.Price, Quantity: o.Remaining()})
+		levels = append(levels, BookLevel{Price: o.Price, Quantity: o.Remaining()})
 	}
 	return levels
 }
@@ -323,7 +337,7 @@ func updateStatus(o *types.Order) {
 
 // cloneOrder 浅拷贝结构体，避免返回内部指针被外部修改
 func cloneOrder(o *types.Order) *types.Order {
-	c := *o  // 拷贝一份值
+	c := *o   // 拷贝一份值
 	return &c // 再取地址返回
 }
 
