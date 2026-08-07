@@ -1,4 +1,4 @@
-// 入口文件：组装各模块并启动 HTTP 服务
+// 入口文件：组装各模块并启动 HTTP 服务（Gin）
 // 依赖：docker compose up -d  （Postgres + Redis）
 // 运行：cd exchange && go run .
 package main
@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/demo/exchange/internal/account"
 	"github.com/demo/exchange/internal/api"
@@ -18,6 +17,7 @@ import (
 	"github.com/demo/exchange/internal/config"
 	"github.com/demo/exchange/internal/engine"
 	"github.com/demo/exchange/internal/store"
+	"github.com/gin-gonic/gin"
 )
 
 //go:embed static/*
@@ -56,58 +56,31 @@ func main() {
 		log.Printf("已初始化演示用户 alice / bob")
 	}
 
-	// 4) 撮合引擎（内部会 [DB:READ] 恢复挂单）
+	// 4) 撮合引擎 + Gin API
 	eng := engine.New("BTC-USDT", "BTC", "USDT", ledger, db)
 	apiServer := api.New(ledger, eng, rdb)
+	r := apiServer.Engine()
 
+	// 5) 非 /api 路径走静态前端
 	web, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		log.Fatal(err)
 	}
 	fileServer := http.FileServer(http.FS(web))
-
-	root := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			apiServer.ServeHTTP(w, r)
+	r.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 			return
 		}
-		fileServer.ServeHTTP(w, r)
+		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
 
-	log.Printf("交易所 Demo 已启动: http://localhost%s", cfg.HTTPAddr)
+	log.Printf("交易所 Demo 已启动 (Gin): http://localhost%s", cfg.HTTPAddr)
 	log.Printf("Postgres + Redis 已连接 | 交易对 BTC-USDT | 用户 alice/bob")
 	log.Printf("  GET  /api/book | /api/trades | /api/balances | /api/ledger")
 	log.Printf("  POST /api/orders | DELETE /api/orders/{id}")
 
-	if err := http.ListenAndServe(cfg.HTTPAddr, withCORS(withRateLimit(rdb, root))); err != nil {
+	if err := r.Run(cfg.HTTPAddr); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-Id")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// withRateLimit [Redis:WRITE] 每个 IP 每分钟最多 120 次请求
-func withRateLimit(rdb *cache.Redis, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
-		ctx, cancel := context.WithTimeout(r.Context(), 200*time.Millisecond)
-		defer cancel()
-		ok, err := rdb.Allow(ctx, ip, 120, time.Minute) // [Redis:WRITE]
-		if err == nil && !ok {
-			http.Error(w, `{"error":"请求过于频繁"}`, http.StatusTooManyRequests)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }

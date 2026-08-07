@@ -1,174 +1,183 @@
-// Package api：HTTP 接口层（≈ Express / Next.js Route Handlers）
+// Package api：HTTP 接口层（Gin）
 // 只负责：解析请求 → 调 engine/account → 返回 JSON
 package api
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/demo/exchange/internal/account"
 	"github.com/demo/exchange/internal/cache"
 	"github.com/demo/exchange/internal/engine"
 	"github.com/demo/exchange/internal/types"
+	"github.com/gin-gonic/gin"
 )
 
-// Server 把账本 + 撮合引擎挂到路由上
+// Server 把账本 + 撮合引擎挂到 Gin 路由上
 type Server struct {
 	ledger *account.Ledger
 	engine *engine.Engine
 	rdb    *cache.Redis
-	mux    *http.ServeMux
+	router *gin.Engine
 }
 
 func New(ledger *account.Ledger, eng *engine.Engine, rdb *cache.Redis) *Server {
-	s := &Server{ledger: ledger, engine: eng, rdb: rdb, mux: http.NewServeMux()}
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(corsMiddleware())
+	r.Use(rateLimitMiddleware(rdb)) // [Redis:WRITE] 限流
+
+	s := &Server{ledger: ledger, engine: eng, rdb: rdb, router: r}
 	s.routes()
 	return s
 }
 
-// Handler 把自己当成 http.Handler 返回（因为实现了 ServeHTTP）
-func (s *Server) Handler() http.Handler { return s }
+// Engine 返回 Gin 引擎，供 main 挂静态资源并 Listen
+func (s *Server) Engine() *gin.Engine { return s.router }
 
-// routes 注册路由，写法像：METHOD + path
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /api/health", s.health)
-	s.mux.HandleFunc("GET /api/book", s.book)             // 订单簿
-	s.mux.HandleFunc("GET /api/trades", s.trades)         // 最近成交
-	s.mux.HandleFunc("GET /api/balances", s.balances)          // [Redis:READ] 优先，可能回源内存
-	s.mux.HandleFunc("GET /api/ledger", s.ledgerEntries)       // [DB:READ] 余额流水
-	s.mux.HandleFunc("POST /api/deposit", s.deposit)           // [DB:WRITE] 充值
-	s.mux.HandleFunc("POST /api/orders", s.placeOrder)         // [DB:WRITE] 下单落盘
-	s.mux.HandleFunc("GET /api/orders", s.openOrders)          // 内存挂单
-	s.mux.HandleFunc("DELETE /api/orders/{id}", s.cancelOrder) // [DB:WRITE] 撤单落盘
-}
-
-// ServeHTTP ≈ middleware + router
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-User-Id")
-	if r.Method == http.MethodOptions { // 浏览器预检请求
-		w.WriteHeader(http.StatusNoContent) // 204
-		return
+	api := s.router.Group("/api")
+	{
+		api.GET("/health", s.health)
+		api.GET("/book", s.book)                 // 订单簿
+		api.GET("/trades", s.trades)             // 最近成交
+		api.GET("/balances", s.balances)         // [Redis:READ]
+		api.GET("/ledger", s.ledgerEntries)      // [DB:READ]
+		api.POST("/deposit", s.deposit)          // [DB:WRITE]
+		api.POST("/orders", s.placeOrder)        // [DB:WRITE]
+		api.GET("/orders", s.openOrders)         // 内存挂单
+		api.DELETE("/orders/:id", s.cancelOrder) // [DB:WRITE]
 	}
-	s.mux.ServeHTTP(w, r)
 }
 
-func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
-	// _ 表示这个参数用不到，但函数签名必须留着
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "symbol": s.engine.Symbol()})
+func (s *Server) health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "symbol": s.engine.Symbol()})
 }
 
 // GET /api/book?depth=8
-func (s *Server) book(w http.ResponseWriter, r *http.Request) {
-	// r.URL.Query().Get ≈ new URLSearchParams(location.search).get
-	depth, _ := strconv.Atoi(r.URL.Query().Get("depth")) // Atoi = string → int；_ 忽略错误
-	writeJSON(w, http.StatusOK, s.engine.Snapshot(depth))
+func (s *Server) book(c *gin.Context) {
+	depth, _ := strconv.Atoi(c.Query("depth"))
+	c.JSON(http.StatusOK, s.engine.Snapshot(depth))
 }
 
-func (s *Server) trades(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+func (s *Server) trades(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.Query("limit"))
 	if limit <= 0 {
 		limit = 20
 	}
-	writeJSON(w, http.StatusOK, s.engine.RecentTrades(limit))
+	c.JSON(http.StatusOK, s.engine.RecentTrades(limit))
 }
 
-func (s *Server) balances(w http.ResponseWriter, r *http.Request) {
-	user := userID(r)
-	writeJSON(w, http.StatusOK, s.ledger.GetBalances(user)) // [Redis:READ]
+func (s *Server) balances(c *gin.Context) {
+	c.JSON(http.StatusOK, s.ledger.GetBalances(userID(c))) // [Redis:READ]
 }
 
 // GET /api/ledger [DB:READ]
-func (s *Server) ledgerEntries(w http.ResponseWriter, r *http.Request) {
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	entries, err := s.ledger.ListLedger(userID(r), limit) // [DB:READ]
+func (s *Server) ledgerEntries(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	entries, err := s.ledger.ListLedger(userID(c), limit) // [DB:READ]
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	c.JSON(http.StatusOK, entries)
 }
 
-func (s *Server) deposit(w http.ResponseWriter, r *http.Request) {
-	user := userID(r)
-	// 匿名 struct：只在这里用一次的请求体类型
-	// ≈ const body = await req.json() as { asset: string; amount: number }
+func (s *Server) deposit(c *gin.Context) {
+	user := userID(c)
 	var body struct {
 		Asset  string  `json:"asset"`
 		Amount float64 `json:"amount"`
 	}
-	// Decode(&body)：必须传指针，才能把 JSON 写进 body
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Asset == "" || body.Amount <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "需要 asset 和 amount"})
+	if err := c.ShouldBindJSON(&body); err != nil || body.Asset == "" || body.Amount <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "需要 asset 和 amount"})
 		return
 	}
 	if err := s.ledger.Deposit(user, body.Asset, body.Amount); err != nil { // [DB:WRITE]
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, s.ledger.GetBalances(user))
+	c.JSON(http.StatusOK, s.ledger.GetBalances(user))
 }
 
-func (s *Server) placeOrder(w http.ResponseWriter, r *http.Request) {
-	user := userID(r)
+func (s *Server) placeOrder(c *gin.Context) {
+	user := userID(c)
 	var body struct {
 		Side     types.Side `json:"side"`
 		Price    float64    `json:"price"`
 		Quantity float64    `json:"quantity"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效 JSON"})
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效 JSON"})
 		return
 	}
 	order, trades, err := s.engine.Place(user, body.Side, body.Price, body.Quantity)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	// map[string]any ≈ Record<string, unknown>，any 是任意类型
-	writeJSON(w, http.StatusCreated, map[string]any{
+	c.JSON(http.StatusCreated, gin.H{
 		"order":  order,
 		"trades": trades,
 	})
 }
 
-func (s *Server) openOrders(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.engine.OpenOrders(userID(r)))
+func (s *Server) openOrders(c *gin.Context) {
+	c.JSON(http.StatusOK, s.engine.OpenOrders(userID(c)))
 }
 
-func (s *Server) cancelOrder(w http.ResponseWriter, r *http.Request) {
-	// PathValue("id") ≈ req.params.id
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64) // 10 进制，64 位整数
+func (s *Server) cancelOrder(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效订单 ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效订单 ID"})
 		return
 	}
-	order, err := s.engine.Cancel(userID(r), id)
+	order, err := s.engine.Cancel(userID(c), id)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, order)
+	c.JSON(http.StatusOK, order)
 }
 
-// userID 从请求头取当前用户（演示用，正式项目会用登录 token）
-// 前端对应：fetch(url, { headers: { 'X-User-Id': 'alice' } })
-func userID(r *http.Request) string {
-	u := r.Header.Get("X-User-Id")
+// userID 从请求头取当前用户（演示用）
+func userID(c *gin.Context) string {
+	u := c.GetHeader("X-User-Id")
 	if u == "" {
-		u = r.URL.Query().Get("user_id")
+		u = c.Query("user_id")
 	}
 	if u == "" {
-		u = "alice" // 默认用户
+		u = "alice"
 	}
 	return u
 }
 
-// writeJSON 统一写 JSON 响应 ≈ res.status(code).json(data)
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status) // 先设 status，再写 body
-	_ = json.NewEncoder(w).Encode(v)
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-User-Id")
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+		c.Next()
+	}
+}
+
+// rateLimitMiddleware [Redis:WRITE] 每 IP 每分钟最多 120 次
+func rateLimitMiddleware(rdb *cache.Redis) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 200*time.Millisecond)
+		defer cancel()
+		ok, err := rdb.Allow(ctx, c.ClientIP(), 120, time.Minute)
+		if err == nil && !ok {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁"})
+			return
+		}
+		c.Next()
+	}
 }
