@@ -3,12 +3,15 @@
 package engine
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/demo/exchange/internal/account"
+	"github.com/demo/exchange/internal/store"
 	"github.com/demo/exchange/internal/types"
 )
 
@@ -16,31 +19,95 @@ import (
 // 规则：价格优先，同价则时间优先（先来的先成交）
 type Engine struct {
 	mu      sync.Mutex
-	symbol  string // 交易对名，如 BTC-USDT
-	base    string // 基础币 BTC（你买卖的东西）
-	quote   string // 计价币 USDT（用什么付钱）
+	symbol  string
+	base    string
+	quote   string
 	ledger  *account.Ledger
-	bids    []*types.Order         // 买盘数组（slice ≈ JS Array）
-	asks    []*types.Order         // 卖盘数组
-	orders  map[int64]*types.Order // 所有订单索引 id -> order
-	trades  []*types.Trade         // 成交历史
-	nextOID int64                  // 订单自增 ID
-	nextTID int64                  // 成交自增 ID
+	db      *store.DB // [DB] Postgres：订单/成交落盘与恢复
+	bids    []*types.Order
+	asks    []*types.Order
+	orders  map[int64]*types.Order
+	trades  []*types.Trade
+	nextOID int64
+	nextTID int64
 }
 
-// New 创建引擎 ≈ new Engine({ symbol, base, quote, ledger })
-func New(symbol, base, quote string, ledger *account.Ledger) *Engine {
-	return &Engine{
+// New 创建引擎；db 非空时 [DB:READ] 恢复挂单/成交
+func New(symbol, base, quote string, ledger *account.Ledger, db *store.DB) *Engine {
+	e := &Engine{
 		symbol: symbol,
 		base:   base,
 		quote:  quote,
 		ledger: ledger,
+		db:     db,
 		orders: make(map[int64]*types.Order),
 		trades: make([]*types.Trade, 0),
 	}
+	if db != nil {
+		if err := e.Restore(); err != nil { // [DB:READ]
+			log.Printf("恢复订单簿失败: %v", err)
+		}
+	}
+	return e
 }
 
 func (e *Engine) Symbol() string { return e.symbol }
+
+// Restore [DB:READ] 从 Postgres 加载订单/成交到内存订单簿
+func (e *Engine) Restore() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	orders, err := e.db.LoadOrders(ctx) // [DB:READ]
+	if err != nil {
+		return err
+	}
+	for _, o := range orders {
+		e.orders[o.ID] = o
+		if o.ID > e.nextOID {
+			e.nextOID = o.ID
+		}
+		if (o.Status == types.StatusOpen || o.Status == types.StatusPartial) && o.Remaining() > 0 {
+			e.rest(o)
+		}
+	}
+	trades, err := e.db.LoadTrades(ctx) // [DB:READ]
+	if err != nil {
+		return err
+	}
+	e.trades = trades
+	for _, t := range trades {
+		if t.ID > e.nextTID {
+			e.nextTID = t.ID
+		}
+	}
+	log.Printf("已从 Postgres 恢复: 订单 %d 笔, 成交 %d 笔, 买盘 %d / 卖盘 %d",
+		len(e.orders), len(e.trades), len(e.bids), len(e.asks))
+	return nil
+}
+
+// saveOrder [DB:WRITE] 订单落盘
+func (e *Engine) saveOrder(o *types.Order) {
+	if e.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := e.db.UpsertOrder(ctx, o); err != nil { // [DB:WRITE]
+		log.Printf("落盘订单失败 #%d: %v", o.ID, err)
+	}
+}
+
+// saveTrade [DB:WRITE] 成交落盘
+func (e *Engine) saveTrade(t *types.Trade) {
+	if e.db == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := e.db.InsertTrade(ctx, t); err != nil { // [DB:WRITE]
+		log.Printf("落盘成交失败 #%d: %v", t.ID, err)
+	}
+}
 
 // Place 下限价单，并立刻尝试撮合
 // 多返回值：(订单, 本次产生的成交列表, 错误)
@@ -68,6 +135,7 @@ func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*typ
 	}
 
 	e.nextOID++
+	log.Printf("下单 #%d: %s %s %f %f", e.nextOID, userID, side, price, qty)
 	order := &types.Order{ // & 取地址，得到指针（引用语义）
 		ID:        e.nextOID,
 		UserID:    userID,
@@ -85,7 +153,10 @@ func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*typ
 	if order.Remaining() > 0 && order.Status != types.StatusFilled {
 		e.rest(order)
 	}
-	// 返回拷贝，避免外部改到引擎内部数据
+	e.saveOrder(order) // [DB:WRITE] 本单落盘
+	for _, t := range trades {
+		e.saveTrade(t) // [DB:WRITE] 成交落盘
+	}
 	return cloneOrder(order), cloneTrades(trades), nil
 }
 
@@ -114,6 +185,7 @@ func (e *Engine) Cancel(userID string, orderID int64) (*types.Order, error) {
 
 	order.Status = types.StatusCancelled
 	e.removeFromBook(order)
+	e.saveOrder(order) // [DB:WRITE] 撤单状态落盘
 	return cloneOrder(order), nil
 }
 
@@ -241,8 +313,8 @@ func (e *Engine) match(taker *types.Order) []*types.Trade {
 		}
 		e.trades = append(e.trades, tr)
 		trades = append(trades, tr)
+		e.saveOrder(maker) // [DB:WRITE] maker 状态可能变 partial/filled
 
-		// maker 吃完了就从订单簿拿掉
 		if maker.Remaining() == 0 {
 			e.removeFromBook(maker)
 		}
@@ -259,8 +331,7 @@ func (e *Engine) rest(order *types.Order) {
 	}
 }
 
-func (e *Engine) removeFromBook(order *types.Order) 
-{
+func (e *Engine) removeFromBook(order *types.Order) {
 	if order.Side == types.SideBuy {
 		e.bids = filterOut(e.bids, order.ID)
 	} else {

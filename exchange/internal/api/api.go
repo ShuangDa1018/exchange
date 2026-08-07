@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/demo/exchange/internal/account"
+	"github.com/demo/exchange/internal/cache"
 	"github.com/demo/exchange/internal/engine"
 	"github.com/demo/exchange/internal/types"
 )
@@ -16,11 +17,12 @@ import (
 type Server struct {
 	ledger *account.Ledger
 	engine *engine.Engine
-	mux    *http.ServeMux // 路由器 ≈ express.Router()
+	rdb    *cache.Redis
+	mux    *http.ServeMux
 }
 
-func New(ledger *account.Ledger, eng *engine.Engine) *Server {
-	s := &Server{ledger: ledger, engine: eng, mux: http.NewServeMux()}
+func New(ledger *account.Ledger, eng *engine.Engine, rdb *cache.Redis) *Server {
+	s := &Server{ledger: ledger, engine: eng, rdb: rdb, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -33,11 +35,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/health", s.health)
 	s.mux.HandleFunc("GET /api/book", s.book)             // 订单簿
 	s.mux.HandleFunc("GET /api/trades", s.trades)         // 最近成交
-	s.mux.HandleFunc("GET /api/balances", s.balances)     // 余额
-	s.mux.HandleFunc("POST /api/deposit", s.deposit)      // 充值（演示）
-	s.mux.HandleFunc("POST /api/orders", s.placeOrder)    // 下单
-	s.mux.HandleFunc("GET /api/orders", s.openOrders)     // 我的挂单
-	s.mux.HandleFunc("DELETE /api/orders/{id}", s.cancelOrder) // 撤单
+	s.mux.HandleFunc("GET /api/balances", s.balances)          // [Redis:READ] 优先，可能回源内存
+	s.mux.HandleFunc("GET /api/ledger", s.ledgerEntries)       // [DB:READ] 余额流水
+	s.mux.HandleFunc("POST /api/deposit", s.deposit)           // [DB:WRITE] 充值
+	s.mux.HandleFunc("POST /api/orders", s.placeOrder)         // [DB:WRITE] 下单落盘
+	s.mux.HandleFunc("GET /api/orders", s.openOrders)          // 内存挂单
+	s.mux.HandleFunc("DELETE /api/orders/{id}", s.cancelOrder) // [DB:WRITE] 撤单落盘
 }
 
 // ServeHTTP ≈ middleware + router
@@ -74,7 +77,18 @@ func (s *Server) trades(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) balances(w http.ResponseWriter, r *http.Request) {
 	user := userID(r)
-	writeJSON(w, http.StatusOK, s.ledger.GetBalances(user))
+	writeJSON(w, http.StatusOK, s.ledger.GetBalances(user)) // [Redis:READ]
+}
+
+// GET /api/ledger [DB:READ]
+func (s *Server) ledgerEntries(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	entries, err := s.ledger.ListLedger(userID(r), limit) // [DB:READ]
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, entries)
 }
 
 func (s *Server) deposit(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +104,7 @@ func (s *Server) deposit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "需要 asset 和 amount"})
 		return
 	}
-	if err := s.ledger.Deposit(user, body.Asset, body.Amount); err != nil {
+	if err := s.ledger.Deposit(user, body.Asset, body.Amount); err != nil { // [DB:WRITE]
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
