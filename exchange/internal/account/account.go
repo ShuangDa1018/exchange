@@ -79,12 +79,14 @@ func (l *Ledger) EnsureUser(userID string, seed map[string]float64) {
 func (l *Ledger) GetBalances(userID string) map[string]Balance {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if cached, ok, err := l.rdb.GetBalances(ctx, userID); err == nil && ok { // [Redis:READ]
-		out := make(map[string]Balance, len(cached))
-		for asset, b := range cached {
-			out[asset] = Balance{Available: b.Available, Locked: b.Locked}
+	if l.rdb != nil {
+		if cached, ok, err := l.rdb.GetBalances(ctx, userID); err == nil && ok { // [Redis:READ]
+			out := make(map[string]Balance, len(cached))
+			for asset, b := range cached {
+				out[asset] = Balance{Available: b.Available, Locked: b.Locked}
+			}
+			return out
 		}
-		return out
 	}
 
 	l.mu.Lock()

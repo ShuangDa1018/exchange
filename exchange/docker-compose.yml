@@ -25,5 +25,27 @@ services:
       timeout: 3s
       retries: 10
 
+  # Redpanda = Kafka API 兼容，单节点适合学习
+  redpanda:
+    image: redpandadata/redpanda:v24.2.4
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
 volumes:
   pgdata:

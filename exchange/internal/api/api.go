@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/demo/exchange/internal/account"
+	"github.com/demo/exchange/internal/auth"
 	"github.com/demo/exchange/internal/cache"
 	"github.com/demo/exchange/internal/engine"
 	"github.com/demo/exchange/internal/types"
@@ -20,36 +21,40 @@ type Server struct {
 	ledger *account.Ledger
 	engine *engine.Engine
 	rdb    *cache.Redis
+	auth   *auth.Service
 	router *gin.Engine
 }
 
-func New(ledger *account.Ledger, eng *engine.Engine, rdb *cache.Redis) *Server {
+func New(ledger *account.Ledger, eng *engine.Engine, rdb *cache.Redis, authSvc *auth.Service) *Server {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(corsMiddleware())
 	r.Use(rateLimitMiddleware(rdb)) // [Redis:WRITE] 限流
+	r.Use(authSvc.Middleware())     // JWT 或 X-User-Id
 
-	s := &Server{ledger: ledger, engine: eng, rdb: rdb, router: r}
+	s := &Server{ledger: ledger, engine: eng, rdb: rdb, auth: authSvc, router: r}
 	s.routes()
 	return s
 }
 
-// Engine 返回 Gin 引擎，供 main 挂静态资源并 Listen
 func (s *Server) Engine() *gin.Engine { return s.router }
 
 func (s *Server) routes() {
 	api := s.router.Group("/api")
 	{
 		api.GET("/health", s.health)
-		api.GET("/book", s.book)                 // 订单簿
-		api.GET("/trades", s.trades)             // 最近成交
+		api.POST("/login", s.login)       // 学习：换 JWT
+		api.POST("/register", s.register) // 学习：注册并换 JWT
+
+		api.GET("/book", s.book)                 // [MEM]
+		api.GET("/trades", s.trades)             // [MEM]
 		api.GET("/balances", s.balances)         // [Redis:READ]
 		api.GET("/ledger", s.ledgerEntries)      // [DB:READ]
 		api.POST("/deposit", s.deposit)          // [DB:WRITE]
-		api.POST("/orders", s.placeOrder)        // [DB:WRITE]
-		api.GET("/orders", s.openOrders)         // 内存挂单
-		api.DELETE("/orders/:id", s.cancelOrder) // [DB:WRITE]
+		api.POST("/orders", s.placeOrder)        // [MEM]+[DB:WRITE]+[Kafka]
+		api.GET("/orders", s.openOrders)         // [MEM]
+		api.DELETE("/orders/:id", s.cancelOrder) // [MEM]+[DB:WRITE]
 	}
 }
 
@@ -57,7 +62,44 @@ func (s *Server) health(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "symbol": s.engine.Symbol()})
 }
 
-// GET /api/book?depth=8
+// POST /api/login {"user_id":"alice","password":"alice"}
+func (s *Server) login(c *gin.Context) {
+	var body struct {
+		UserID   string `json:"user_id"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.UserID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "需要 user_id 和 password"})
+		return
+	}
+	token, err := s.auth.Login(body.UserID, body.Password)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"token": token, "user_id": body.UserID})
+}
+
+// POST /api/register {"user_id":"carol","password":"carol"}
+func (s *Server) register(c *gin.Context) {
+	var body struct {
+		UserID   string `json:"user_id"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.UserID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "需要 user_id 和 password"})
+		return
+	}
+	token, err := s.auth.Register(body.UserID, body.Password)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// 演示：新用户给一点种子资金，方便立刻下单
+	s.ledger.EnsureUser(body.UserID, map[string]float64{"USDT": 10000, "BTC": 1})
+	c.JSON(http.StatusCreated, gin.H{"token": token, "user_id": body.UserID})
+}
+
 func (s *Server) book(c *gin.Context) {
 	depth, _ := strconv.Atoi(c.Query("depth"))
 	c.JSON(http.StatusOK, s.engine.Snapshot(depth))
@@ -72,13 +114,12 @@ func (s *Server) trades(c *gin.Context) {
 }
 
 func (s *Server) balances(c *gin.Context) {
-	c.JSON(http.StatusOK, s.ledger.GetBalances(userID(c))) // [Redis:READ]
+	c.JSON(http.StatusOK, s.ledger.GetBalances(auth.UserID(c)))
 }
 
-// GET /api/ledger [DB:READ]
 func (s *Server) ledgerEntries(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.Query("limit"))
-	entries, err := s.ledger.ListLedger(userID(c), limit) // [DB:READ]
+	entries, err := s.ledger.ListLedger(auth.UserID(c), limit)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -87,7 +128,7 @@ func (s *Server) ledgerEntries(c *gin.Context) {
 }
 
 func (s *Server) deposit(c *gin.Context) {
-	user := userID(c)
+	user := auth.UserID(c)
 	var body struct {
 		Asset  string  `json:"asset"`
 		Amount float64 `json:"amount"`
@@ -96,7 +137,7 @@ func (s *Server) deposit(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "需要 asset 和 amount"})
 		return
 	}
-	if err := s.ledger.Deposit(user, body.Asset, body.Amount); err != nil { // [DB:WRITE]
+	if err := s.ledger.Deposit(user, body.Asset, body.Amount); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -104,7 +145,7 @@ func (s *Server) deposit(c *gin.Context) {
 }
 
 func (s *Server) placeOrder(c *gin.Context) {
-	user := userID(c)
+	user := auth.UserID(c)
 	var body struct {
 		Side     types.Side `json:"side"`
 		Price    float64    `json:"price"`
@@ -119,14 +160,11 @@ func (s *Server) placeOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"order":  order,
-		"trades": trades,
-	})
+	c.JSON(http.StatusCreated, gin.H{"order": order, "trades": trades})
 }
 
 func (s *Server) openOrders(c *gin.Context) {
-	c.JSON(http.StatusOK, s.engine.OpenOrders(userID(c)))
+	c.JSON(http.StatusOK, s.engine.OpenOrders(auth.UserID(c)))
 }
 
 func (s *Server) cancelOrder(c *gin.Context) {
@@ -135,7 +173,7 @@ func (s *Server) cancelOrder(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效订单 ID"})
 		return
 	}
-	order, err := s.engine.Cancel(userID(c), id)
+	order, err := s.engine.Cancel(auth.UserID(c), id)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -143,23 +181,11 @@ func (s *Server) cancelOrder(c *gin.Context) {
 	c.JSON(http.StatusOK, order)
 }
 
-// userID 从请求头取当前用户（演示用）
-func userID(c *gin.Context) string {
-	u := c.GetHeader("X-User-Id")
-	if u == "" {
-		u = c.Query("user_id")
-	}
-	if u == "" {
-		u = "alice"
-	}
-	return u
-}
-
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, X-User-Id")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-User-Id, Authorization")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)
 			return
@@ -168,12 +194,17 @@ func corsMiddleware() gin.HandlerFunc {
 	}
 }
 
-// rateLimitMiddleware [Redis:WRITE] 每 IP 每分钟最多 120 次
 func rateLimitMiddleware(rdb *cache.Redis) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if rdb == nil || path == "/api/login" || path == "/api/register" {
+			c.Next()
+			return
+		}
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 200*time.Millisecond)
 		defer cancel()
-		ok, err := rdb.Allow(ctx, c.ClientIP(), 120, time.Minute)
+		// 前端约 4 路轮询；演示环境给宽一点，避免正常刷新就 429
+		ok, err := rdb.Allow(ctx, c.ClientIP(), 600, time.Minute)
 		if err == nil && !ok {
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁"})
 			return

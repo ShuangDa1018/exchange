@@ -1,4 +1,4 @@
-// Package store：PostgreSQL 持久化（余额 / 流水 / 订单 / 成交）
+// Package store：PostgreSQL 持久化（用户 / 余额 / 流水 / 订单 / 成交）
 //
 // 标记约定（全文可搜）：
 //   [DB]         Postgres 相关
@@ -13,13 +13,18 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"time"
 
 	"github.com/demo/exchange/internal/types"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+var ErrUserExists = errors.New("user already exists")
+var ErrUserNotFound = errors.New("user not found")
 
 type DB struct {
 	pool *pgxpool.Pool
@@ -173,4 +178,30 @@ func (db *DB) LoadTrades(ctx context.Context) ([]*types.Trade, error) {
 		out = append(out, &t)
 	}
 	return out, rows.Err()
+}
+
+// CreateUser [DB:WRITE] → queries/create_user.sql
+func (db *DB) CreateUser(ctx context.Context, userID, passwordHash string) error {
+	var id string
+	err := db.pool.QueryRow(ctx, sqlCreateUser, userID, passwordHash).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrUserExists
+	}
+	return err
+}
+
+// GetUserPassword [DB:READ] → queries/get_user_password.sql
+func (db *DB) GetUserPassword(ctx context.Context, userID string) (string, error) {
+	var hash string
+	err := db.pool.QueryRow(ctx, sqlGetUserPassword, userID).Scan(&hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUserNotFound
+	}
+	return hash, err
+}
+
+// EnsureUser [DB:WRITE] → queries/ensure_user.sql（种子用户，已存在则跳过）
+func (db *DB) EnsureUser(ctx context.Context, userID, passwordHash string) error {
+	_, err := db.pool.Exec(ctx, sqlEnsureUser, userID, passwordHash)
+	return err
 }

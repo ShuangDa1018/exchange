@@ -179,22 +179,148 @@
       min-height: 18px;
     }
     .span2 { grid-column: 1 / -1; }
+    .btn-auth {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .btn-auth.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .modal-mask {
+      position: fixed;
+      inset: 0;
+      background: rgba(20, 33, 43, 0.45);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 16px;
+      backdrop-filter: blur(2px);
+    }
+    .modal-mask.open { display: flex; }
+    .modal {
+      width: min(380px, 100%);
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 22px 22px 18px;
+      box-shadow: 0 18px 48px rgba(20, 33, 43, 0.18);
+      animation: pop 0.18s ease-out;
+    }
+    @keyframes pop {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to { opacity: 1; transform: none; }
+    }
+    .modal h2 {
+      margin: 0 0 4px;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+    .modal .hint {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    .modal form { display: grid; gap: 12px; }
+    .modal input { width: 100%; }
+    .modal .actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .modal .actions button { flex: 1; height: 40px; }
+    .quick {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+    .quick button {
+      height: 28px;
+      padding: 0 10px;
+      border: 1px dashed var(--line);
+      border-radius: 999px;
+      background: #f7fafb;
+      color: var(--muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    body.locked main {
+      filter: grayscale(0.15);
+      pointer-events: none;
+      user-select: none;
+    }
+    .modal-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 4px;
+    }
+    .modal-head h2 { margin: 0; }
+    .modal-close {
+      flex: none;
+      width: 32px;
+      height: 32px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fafb;
+      color: var(--muted);
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .modal-close:hover { color: var(--ink); border-color: #c5d0d6; }
   </style>
 </head>
-<body>
+<body class="locked">
   <header>
     <div>
       <h1>BTC-USDT</h1>
-      <div class="sub">基础现货交易所 · 限价撮合 · 内存账本</div>
+      <div class="sub">Gin · JWT · Postgres/Redis · 限价撮合 · 打开本页即前端</div>
     </div>
     <div class="user-switch">
-      <span>当前用户</span>
-      <select id="user">
-        <option value="alice">alice</option>
-        <option value="bob">bob</option>
-      </select>
+      <span id="auth-status" style="color:var(--muted)">未登录</span>
+      <button type="button" class="btn-auth primary" id="btn-login">登录</button>
+      <button type="button" class="btn-auth" id="btn-register">注册</button>
+      <button type="button" class="btn-auth" id="btn-logout" hidden>退出</button>
     </div>
   </header>
+
+  <div class="modal-mask open" id="login-mask" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="modal">
+      <div class="modal-head">
+        <h2 id="login-title">登录交易所</h2>
+        <button type="button" class="modal-close" id="auth-close" aria-label="关闭">×</button>
+      </div>
+      <div class="hint" id="auth-hint">演示账号：alice / alice · bob / bob；也可注册新用户</div>
+      <form id="login-form">
+        <label>用户名
+          <input id="login-user" autocomplete="username" placeholder="alice 或自定义" required />
+        </label>
+        <label>密码
+          <input id="login-pass" type="password" autocomplete="current-password" placeholder="至少 3 位" required />
+        </label>
+        <div class="quick" id="auth-quick">
+          <button type="button" data-fill="alice">填入 alice</button>
+          <button type="button" data-fill="bob">填入 bob</button>
+        </div>
+        <div class="err" id="login-err"></div>
+        <div class="actions">
+          <button type="button" class="btn-auth" id="auth-switch">去注册</button>
+          <button type="submit" class="submit" id="auth-submit">登录获取 JWT</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <main>
     <section class="panel span2">
@@ -250,27 +376,127 @@
   </main>
 
   <script>
-    // Live Server(5500) / 直接打开 HTML 时，请求打到 Go 后端 8080
-    // 若用 go run . 打开 http://localhost:8080，同源也可以
-    const API = "http://localhost:8080";
+    // go run . 后访问：http://localhost:8080/
+    const API = location.origin.includes("5500") || location.protocol === "file:"
+      ? "http://localhost:8080"
+      : "";
     let side = "buy";
+    let token = localStorage.getItem("exchange_token") || "";
+    let currentUser = localStorage.getItem("exchange_user") || "";
+    let pollTimer = null;
+    let authMode = "login"; // login | register
 
     const $ = (id) => document.getElementById(id);
-    const user = () => $("user").value;
+
+    function setAuthUI(loggedIn) {
+      document.body.classList.toggle("locked", !loggedIn);
+      $("btn-logout").hidden = !loggedIn;
+      $("btn-login").textContent = loggedIn ? "切换账号" : "登录";
+      $("btn-login").classList.toggle("primary", !loggedIn);
+      $("btn-register").hidden = loggedIn;
+      $("auth-status").textContent = loggedIn ? ("JWT ✓ " + currentUser) : "未登录";
+    }
+
+    function setAuthMode(mode) {
+      authMode = mode;
+      const isReg = mode === "register";
+      $("login-title").textContent = isReg ? "注册交易所账号" : "登录交易所";
+      $("auth-hint").textContent = isReg
+        ? "新用户注册后立刻拿到 JWT，并获赠演示资金 10000 USDT + 1 BTC"
+        : "演示账号：alice / alice · bob / bob；也可注册新用户";
+      $("auth-quick").hidden = isReg;
+      $("auth-switch").textContent = isReg ? "去登录" : "去注册";
+      $("auth-submit").textContent = isReg ? "注册获取 JWT" : "登录获取 JWT";
+      $("login-pass").autocomplete = isReg ? "new-password" : "current-password";
+      $("login-err").textContent = "";
+    }
+
+    function openLogin(prefill, mode) {
+      setAuthMode(mode || "login");
+      $("login-mask").classList.add("open");
+      $("login-err").textContent = "";
+      if (prefill) {
+        $("login-user").value = prefill;
+        $("login-pass").value = authMode === "login" ? prefill : "";
+      } else if (currentUser && authMode === "login") {
+        $("login-user").value = currentUser;
+        $("login-pass").value = "";
+      } else if (authMode === "register") {
+        $("login-user").value = "";
+        $("login-pass").value = "";
+      }
+      setTimeout(() => $("login-user").focus(), 50);
+    }
+
+    function closeLogin() {
+      $("login-mask").classList.remove("open");
+    }
+
+    async function authRequest(path, userID, password) {
+      const res = await fetch((API || "") + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: userID, password }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || (path.includes("register") ? "注册失败" : "登录失败"));
+      token = body.token;
+      currentUser = body.user_id || userID;
+      localStorage.setItem("exchange_token", token);
+      localStorage.setItem("exchange_user", currentUser);
+      setAuthUI(true);
+      closeLogin();
+      return body;
+    }
+
+    async function login(userID, password) {
+      return authRequest("/api/login", userID, password);
+    }
+
+    async function register(userID, password) {
+      return authRequest("/api/register", userID, password);
+    }
+
+    function logout() {
+      token = "";
+      currentUser = "";
+      localStorage.removeItem("exchange_token");
+      localStorage.removeItem("exchange_user");
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = null;
+      $("balances").textContent = "请先登录";
+      $("bids").innerHTML = "";
+      $("asks").innerHTML = "";
+      $("orders").innerHTML = "";
+      $("trades").innerHTML = "";
+      setAuthUI(false);
+      openLogin();
+    }
 
     async function api(path, options = {}) {
+      if (!token) {
+        openLogin();
+        throw new Error("请先登录");
+      }
       let res;
       try {
-        res = await fetch(API + path, {
+        res = await fetch((API || "") + path, {
           ...options,
           headers: {
             "Content-Type": "application/json",
-            "X-User-Id": user(),
+            Authorization: "Bearer " + token,
             ...(options.headers || {}),
           },
         });
       } catch {
-        throw new Error("无法连接后端，请先执行：cd exchange && go run .");
+        throw new Error("无法连接后端，请先：cd exchange && go run .  → 打开 http://localhost:8080/");
+      }
+      if (res.status === 401) {
+        token = "";
+        localStorage.removeItem("exchange_token");
+        setAuthUI(false);
+        openLogin(currentUser);
+        throw new Error("登录已过期，请重新登录");
       }
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "请求失败");
@@ -323,6 +549,14 @@
         : `<li style="color:var(--muted);display:block">暂无成交</li>`;
     }
 
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => {
+        if (document.hidden || !token) return;
+        refresh().catch(() => {});
+      }, 3000);
+    }
+
     document.querySelectorAll(".sides button").forEach((btn) => {
       btn.addEventListener("click", () => {
         side = btn.dataset.side;
@@ -363,9 +597,66 @@
       }
     });
 
-    $("user").addEventListener("change", () => refresh().catch(console.error));
-    refresh().catch((err) => { $("err").textContent = err.message; });
-    setInterval(() => refresh().catch(() => {}), 2000);
+    $("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("login-err").textContent = "";
+      const uid = $("login-user").value.trim();
+      const pass = $("login-pass").value;
+      try {
+        if (authMode === "register") await register(uid, pass);
+        else await login(uid, pass);
+        await refresh();
+        startPolling();
+      } catch (err) {
+        $("login-err").textContent = err.message;
+      }
+    });
+
+    document.querySelectorAll("[data-fill]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const u = btn.dataset.fill;
+        $("login-user").value = u;
+        $("login-pass").value = u;
+        $("login-pass").focus();
+      });
+    });
+
+    $("auth-switch").addEventListener("click", () => {
+      setAuthMode(authMode === "login" ? "register" : "login");
+      if (authMode === "register") {
+        $("login-user").value = "";
+        $("login-pass").value = "";
+      }
+      $("login-user").focus();
+    });
+    $("auth-close").addEventListener("click", closeLogin);
+    $("login-mask").addEventListener("click", (e) => {
+      if (e.target === $("login-mask")) closeLogin();
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && $("login-mask").classList.contains("open")) {
+        closeLogin();
+      }
+    });
+    $("btn-login").addEventListener("click", () => openLogin(undefined, "login"));
+    $("btn-register").addEventListener("click", () => openLogin(undefined, "register"));
+    $("btn-logout").addEventListener("click", logout);
+
+    (async () => {
+      if (token && currentUser) {
+        setAuthUI(true);
+        closeLogin();
+        try {
+          await refresh();
+          startPolling();
+        } catch {
+          logout();
+        }
+      } else {
+        setAuthUI(false);
+        openLogin("alice", "login");
+      }
+    })();
   </script>
 </body>
 </html>

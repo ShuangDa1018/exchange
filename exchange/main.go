@@ -1,5 +1,5 @@
 // 入口文件：组装各模块并启动 HTTP 服务（Gin）
-// 依赖：docker compose up -d  （Postgres + Redis）
+// 依赖：docker compose up -d
 // 运行：cd exchange && go run .
 package main
 
@@ -7,15 +7,21 @@ import (
 	"context"
 	"embed"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/demo/exchange/internal/account"
 	"github.com/demo/exchange/internal/api"
+	"github.com/demo/exchange/internal/auth"
 	"github.com/demo/exchange/internal/cache"
 	"github.com/demo/exchange/internal/config"
 	"github.com/demo/exchange/internal/engine"
+	"github.com/demo/exchange/internal/mq"
 	"github.com/demo/exchange/internal/store"
 	"github.com/gin-gonic/gin"
 )
@@ -28,43 +34,65 @@ var migrationsFS embed.FS
 
 func main() {
 	cfg := config.Load()
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(log)
+
 	ctx := context.Background()
 
-	// 1) [DB] 连接 Postgres + [DB:MIGRATE] 跑 migrations
 	db, err := store.Open(ctx, cfg.DatabaseURL, migrationsFS)
 	if err != nil {
-		log.Fatalf("Postgres 不可用（先执行 docker compose up -d）: %v", err)
+		log.Error("postgres unavailable", "err", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
-	// 2) [Redis] 连接 Redis（余额缓存 + API 限流）
 	rdb, err := cache.Open(cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {
-		log.Fatalf("Redis 不可用（先执行 docker compose up -d）: %v", err)
+		log.Error("redis unavailable", "err", err)
+		os.Exit(1)
 	}
 	defer rdb.Close()
 
-	// 3) 账本（内部会 [DB:READ] 加载余额、[Redis:WRITE] 预热）
 	ledger := account.NewLedger(db, rdb)
-	has, err := db.HasAnyBalance(ctx) // [DB:READ]
+	has, err := db.HasAnyBalance(ctx)
 	if err != nil {
-		log.Fatal(err)
+		log.Error("check balances", "err", err)
+		os.Exit(1)
 	}
 	if !has {
-		ledger.EnsureUser("alice", map[string]float64{"USDT": 10000, "BTC": 1}) // [DB:WRITE]
-		ledger.EnsureUser("bob", map[string]float64{"USDT": 10000, "BTC": 1})   // [DB:WRITE]
-		log.Printf("已初始化演示用户 alice / bob")
+		ledger.EnsureUser("alice", map[string]float64{"USDT": 10000, "BTC": 1})
+		ledger.EnsureUser("bob", map[string]float64{"USDT": 10000, "BTC": 1})
+		log.Info("seeded demo balances", "users", []string{"alice", "bob"})
 	}
 
-	// 4) 撮合引擎 + Gin API
-	eng := engine.New("BTC-USDT", "BTC", "USDT", ledger, db)
-	apiServer := api.New(ledger, eng, rdb)
+	// [Kafka] 有 brokers 才启用；没有则 Noop（本地可不启 Kafka）
+	var pub mq.TradePublisher = mq.NoopPublisher{}
+	if len(cfg.KafkaBrokers) > 0 {
+		kp, err := mq.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaTopic, log)
+		if err != nil {
+			log.Error("kafka publisher", "err", err)
+			os.Exit(1)
+		}
+		pub = kp
+		defer kp.Close()
+		log.Info("kafka enabled", "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic)
+	} else {
+		log.Info("kafka disabled (set KAFKA_BROKERS to enable)")
+	}
+
+	authSvc := auth.New(cfg.JWTSecret, cfg.JWTHours, db)
+	if err := authSvc.SeedDemoUsers(ctx); err != nil {
+		log.Error("seed demo users", "err", err)
+		os.Exit(1)
+	}
+	eng := engine.New("BTC-USDT", "BTC", "USDT", ledger, db, pub)
+	apiServer := api.New(ledger, eng, rdb, authSvc)
 	r := apiServer.Engine()
 
-	// 5) 非 /api 路径走静态前端
 	web, err := fs.Sub(staticFS, "static")
 	if err != nil {
-		log.Fatal(err)
+		log.Error("static fs", "err", err)
+		os.Exit(1)
 	}
 	fileServer := http.FileServer(http.FS(web))
 	r.NoRoute(func(c *gin.Context) {
@@ -75,12 +103,31 @@ func main() {
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
 
-	log.Printf("交易所 Demo 已启动 (Gin): http://localhost%s", cfg.HTTPAddr)
-	log.Printf("Postgres + Redis 已连接 | 交易对 BTC-USDT | 用户 alice/bob")
-	log.Printf("  GET  /api/book | /api/trades | /api/balances | /api/ledger")
-	log.Printf("  POST /api/orders | DELETE /api/orders/{id}")
+	srv := &http.Server{Addr: cfg.HTTPAddr, Handler: r}
 
-	if err := r.Run(cfg.HTTPAddr); err != nil {
-		log.Fatal(err)
+	go func() {
+		base := "http://localhost" + cfg.HTTPAddr
+		log.Info("exchange started",
+			"frontend", base+"/",
+			"api", base+"/api/health",
+			"login", "POST "+base+"/api/login  body: {\"user_id\":\"alice\",\"password\":\"alice\"}",
+			"register", "POST "+base+"/api/register  body: {\"user_id\":\"carol\",\"password\":\"carol\"}",
+		)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("listen", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	// 优雅退出：等 Ctrl+C，再 Shutdown（学生产习惯）
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	<-stop
+	log.Info("shutting down...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("shutdown", "err", err)
 	}
+	log.Info("bye")
 }

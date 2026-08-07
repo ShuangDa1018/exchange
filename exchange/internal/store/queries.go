@@ -10,15 +10,18 @@ var queryFS embed.FS
 
 // 业务 SQL 从 queries/*.sql 加载（与 migrations 分开：migrations=改表结构，queries=日常增删改查）
 var (
-	sqlUpsertBalance  string
-	sqlLoadBalances   string
-	sqlHasAnyBalance  string
-	sqlAppendLedger   string
-	sqlListLedger     string
-	sqlUpsertOrder    string
-	sqlLoadOrders     string
-	sqlInsertTrade    string
-	sqlLoadTrades     string
+	sqlUpsertBalance   string
+	sqlLoadBalances    string
+	sqlHasAnyBalance   string
+	sqlAppendLedger    string
+	sqlListLedger      string
+	sqlUpsertOrder     string
+	sqlLoadOrders      string
+	sqlInsertTrade     string
+	sqlLoadTrades      string
+	sqlCreateUser      string
+	sqlGetUserPassword string
+	sqlEnsureUser      string
 )
 
 func init() {
@@ -31,6 +34,9 @@ func init() {
 	sqlLoadOrders = mustSQL("queries/load_orders.sql")
 	sqlInsertTrade = mustSQL("queries/insert_trade.sql")
 	sqlLoadTrades = mustSQL("queries/load_trades.sql")
+	sqlCreateUser = mustSQL("queries/create_user.sql")
+	sqlGetUserPassword = mustSQL("queries/get_user_password.sql")
+	sqlEnsureUser = mustSQL("queries/ensure_user.sql")
 }
 
 func mustSQL(name string) string {

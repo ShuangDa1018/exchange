@@ -1,5 +1,13 @@
 // Package engine：撮合引擎（交易所最核心的逻辑）
 // 职责：接单 → 冻结资金 → 和对手盘撮合 → 成交结算 / 挂到订单簿
+//
+// 标记约定（全文可搜）：
+//   [MEM]       只读写内存订单簿（e.orders / bids / asks / trades）
+//   [DB:READ]   从 Postgres 读（仅启动 Restore）
+//   [DB:WRITE]  写入 Postgres（下单/撤单/成交后落盘）
+//
+// 注意：运行中改 TablePlus 的 orders 表不会影响 [MEM]；
+//       要生效需重启进程（再走 Restore），或走 API 下单/撤单。
 package engine
 
 import (
@@ -11,6 +19,7 @@ import (
 	"time"
 
 	"github.com/demo/exchange/internal/account"
+	"github.com/demo/exchange/internal/mq"
 	"github.com/demo/exchange/internal/store"
 	"github.com/demo/exchange/internal/types"
 )
@@ -23,23 +32,28 @@ type Engine struct {
 	base    string
 	quote   string
 	ledger  *account.Ledger
-	db      *store.DB // [DB] Postgres：订单/成交落盘与恢复
-	bids    []*types.Order
-	asks    []*types.Order
-	orders  map[int64]*types.Order
-	trades  []*types.Trade
+	db      *store.DB              // [DB] 落盘/恢复；热路径不查库
+	pub     mq.TradePublisher      // [Kafka] 成交事件；可为 Noop
+	bids    []*types.Order         // [MEM] 买盘
+	asks    []*types.Order         // [MEM] 卖盘
+	orders  map[int64]*types.Order // [MEM] 全部订单索引
+	trades  []*types.Trade         // [MEM] 成交历史
 	nextOID int64
 	nextTID int64
 }
 
-// New 创建引擎；db 非空时 [DB:READ] 恢复挂单/成交
-func New(symbol, base, quote string, ledger *account.Ledger, db *store.DB) *Engine {
+// New 创建引擎；db 非空时 [DB:READ] 恢复挂单/成交；pub 可为 nil（用 Noop）
+func New(symbol, base, quote string, ledger *account.Ledger, db *store.DB, pub mq.TradePublisher) *Engine {
+	if pub == nil {
+		pub = mq.NoopPublisher{}
+	}
 	e := &Engine{
 		symbol: symbol,
 		base:   base,
 		quote:  quote,
 		ledger: ledger,
 		db:     db,
+		pub:    pub,
 		orders: make(map[int64]*types.Order),
 		trades: make([]*types.Trade, 0),
 	}
@@ -53,7 +67,7 @@ func New(symbol, base, quote string, ledger *account.Ledger, db *store.DB) *Engi
 
 func (e *Engine) Symbol() string { return e.symbol }
 
-// Restore [DB:READ] 从 Postgres 加载订单/成交到内存订单簿
+// Restore [DB:READ]→[MEM] 启动时：库 → 内存（之后查询不再读 orders 表）
 func (e *Engine) Restore() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -62,19 +76,19 @@ func (e *Engine) Restore() error {
 		return err
 	}
 	for _, o := range orders {
-		e.orders[o.ID] = o
+		e.orders[o.ID] = o // [MEM] 写入内存
 		if o.ID > e.nextOID {
 			e.nextOID = o.ID
 		}
 		if (o.Status == types.StatusOpen || o.Status == types.StatusPartial) && o.Remaining() > 0 {
-			e.rest(o)
+			e.rest(o) // [MEM] 挂到 bids/asks
 		}
 	}
 	trades, err := e.db.LoadTrades(ctx) // [DB:READ]
 	if err != nil {
 		return err
 	}
-	e.trades = trades
+	e.trades = trades // [MEM]
 	for _, t := range trades {
 		if t.ID > e.nextTID {
 			e.nextTID = t.ID
@@ -109,9 +123,8 @@ func (e *Engine) saveTrade(t *types.Trade) {
 	}
 }
 
-// Place 下限价单，并立刻尝试撮合
+// Place [MEM] 撮合 + 挂簿；结束后 [DB:WRITE] 落盘
 // 多返回值：(订单, 本次产生的成交列表, 错误)
-// ≈ async function place(...): Promise<{ order, trades }>
 func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*types.Order, []*types.Trade, error) {
 	if price <= 0 || qty <= 0 {
 		return nil, nil, fmt.Errorf("价格和数量必须大于 0")
@@ -136,7 +149,7 @@ func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*typ
 
 	e.nextOID++
 	log.Printf("下单 #%d: %s %s %f %f", e.nextOID, userID, side, price, qty)
-	order := &types.Order{ // & 取地址，得到指针（引用语义）
+	order := &types.Order{
 		ID:        e.nextOID,
 		UserID:    userID,
 		Symbol:    e.symbol,
@@ -146,12 +159,11 @@ func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*typ
 		Status:    types.StatusOpen,
 		CreatedAt: time.Now().UTC(),
 	}
-	e.orders[order.ID] = order
+	e.orders[order.ID] = order // [MEM]
 
-	// 先撮合；没吃完的剩余再挂到订单簿
-	trades := e.match(order)
+	trades := e.match(order) // [MEM] 撮合
 	if order.Remaining() > 0 && order.Status != types.StatusFilled {
-		e.rest(order)
+		e.rest(order) // [MEM] 剩余挂簿
 	}
 	e.saveOrder(order) // [DB:WRITE] 本单落盘
 	for _, t := range trades {
@@ -160,12 +172,12 @@ func (e *Engine) Place(userID string, side types.Side, price, qty float64) (*typ
 	return cloneOrder(order), cloneTrades(trades), nil
 }
 
-// Cancel 撤单：解冻剩余资金，并从订单簿移除
+// Cancel [MEM] 改内存状态；再 [DB:WRITE] 落盘
 func (e *Engine) Cancel(userID string, orderID int64) (*types.Order, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	order, ok := e.orders[orderID]
+	order, ok := e.orders[orderID] // [MEM] 查的是内存，不是 DB
 	if !ok {
 		return nil, fmt.Errorf("订单不存在")
 	}
@@ -183,12 +195,13 @@ func (e *Engine) Cancel(userID string, orderID int64) (*types.Order, error) {
 		e.ledger.Unlock(userID, e.base, remain)
 	}
 
-	order.Status = types.StatusCancelled
-	e.removeFromBook(order)
-	e.saveOrder(order) // [DB:WRITE] 撤单状态落盘
+	order.Status = types.StatusCancelled // [MEM]
+	e.removeFromBook(order)              // [MEM]
+	e.saveOrder(order)                   // [DB:WRITE]
 	return cloneOrder(order), nil
 }
 
+// GetOrder [MEM] 只查内存
 func (e *Engine) GetOrder(id int64) (*types.Order, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -199,22 +212,21 @@ func (e *Engine) GetOrder(id int64) (*types.Order, bool) {
 	return cloneOrder(o), true
 }
 
-// OpenOrders 某用户当前挂单（open / partial）
+// OpenOrders [MEM] 只扫内存 e.orders（改 DB 不会反映到这里）
 func (e *Engine) OpenOrders(userID string) []*types.Order {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	out := make([]*types.Order, 0)
 	for _, o := range e.orders {
 		if o.UserID == userID && (o.Status == types.StatusOpen || o.Status == types.StatusPartial) {
-			out = append(out, cloneOrder(o)) // append ≈ push，但要接回变量
+			out = append(out, cloneOrder(o))
 		}
 	}
-	// sort.Slice ≈ arr.sort((a,b) => ...)
 	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
 	return out
 }
 
-// RecentTrades 最近 N 笔成交
+// RecentTrades [MEM] 只读内存 e.trades
 func (e *Engine) RecentTrades(limit int) []*types.Trade {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -222,7 +234,7 @@ func (e *Engine) RecentTrades(limit int) []*types.Trade {
 		limit = len(e.trades)
 	}
 	start := len(e.trades) - limit
-	return cloneTrades(e.trades[start:]) // slice[start:] ≈ arr.slice(start)
+	return cloneTrades(e.trades[start:])
 }
 
 // BookLevel 订单簿的一档：同一价格汇总后的量
@@ -238,7 +250,7 @@ type OrderBookSnapshot struct {
 	Asks   []BookLevel `json:"asks"` // 卖盘：价格从低到高
 }
 
-// Snapshot 盘口深度快照（给前端订单簿）
+// Snapshot [MEM] 盘口快照，只聚合内存 bids/asks
 func (e *Engine) Snapshot(depth int) OrderBookSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -247,13 +259,12 @@ func (e *Engine) Snapshot(depth int) OrderBookSnapshot {
 	}
 	return OrderBookSnapshot{
 		Symbol: e.symbol,
-		Bids:   aggregate(e.bids, depth),
-		Asks:   aggregate(e.asks, depth),
+		Bids:   aggregate(e.bids, depth), // [MEM]
+		Asks:   aggregate(e.asks, depth), // [MEM]
 	}
 }
 
-// match 核心撮合：新单（taker）去吃对手盘最优价（maker）
-// 买单吃卖盘 asks；卖单吃买盘 bids
+// match [MEM] 核心撮合：只改内存订单；结算走 ledger（会落库余额）
 func (e *Engine) match(taker *types.Order) []*types.Trade {
 	var trades []*types.Trade // 零值 nil slice，可以 append
 
@@ -314,6 +325,10 @@ func (e *Engine) match(taker *types.Order) []*types.Trade {
 		e.trades = append(e.trades, tr)
 		trades = append(trades, tr)
 		e.saveOrder(maker) // [DB:WRITE] maker 状态可能变 partial/filled
+		// [Kafka] 异步事件：让行情/通知等下游消费（失败只打日志）
+		go func(t *types.Trade) {
+			_ = e.pub.PublishTrade(context.Background(), t)
+		}(tr)
 
 		if maker.Remaining() == 0 {
 			e.removeFromBook(maker)
