@@ -1,0 +1,10 @@
+{
+  "go.useLanguageServer": true,
+  "go.toolsEnvVars": {
+    "GOPROXY": "https://goproxy.cn,direct",
+    "GOSUMDB": "off"
+  },
+  "gopls": {
+    "build.allowModfileModifications": true
+  }
+}
