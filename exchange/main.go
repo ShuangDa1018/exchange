@@ -77,7 +77,7 @@ func main() {
 		defer kp.Close()
 		log.Info("kafka enabled", "brokers", cfg.KafkaBrokers, "topic", cfg.KafkaTopic)
 	} else {
-		log.Info("kafka disabled (set KAFKA_BROKERS to enable)")
+		log.Info("kafka disabled (set KAFKA_BROKERS=localhost:19092 to stream trades to ranking)")
 	}
 
 	authSvc := auth.New(cfg.JWTSecret, cfg.JWTHours, db)
@@ -87,6 +87,7 @@ func main() {
 	}
 	eng := engine.New("BTC-USDT", "BTC", "USDT", ledger, db, pub)
 	apiServer := api.New(ledger, eng, rdb, authSvc)
+	apiServer.MountRankingProxy(cfg.RankingURL)
 	r := apiServer.Engine()
 
 	web, err := fs.Sub(staticFS, "static")
@@ -109,7 +110,9 @@ func main() {
 		base := "http://localhost" + cfg.HTTPAddr
 		log.Info("exchange started",
 			"frontend", base+"/",
+			"leaderboard", base+"/leaderboard.html",
 			"api", base+"/api/health",
+			"ranking", cfg.RankingURL+"/api/leaderboard",
 			"login", "POST "+base+"/api/login  body: {\"user_id\":\"alice\",\"password\":\"alice\"}",
 			"register", "POST "+base+"/api/register  body: {\"user_id\":\"carol\",\"password\":\"carol\"}",
 		)

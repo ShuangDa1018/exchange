@@ -8,14 +8,15 @@ import (
 )
 
 type Config struct {
-	HTTPAddr    string
-	DatabaseURL string
-	RedisAddr   string
-	RedisPass   string
-	JWTSecret   string
-	JWTHours    int
+	HTTPAddr     string
+	DatabaseURL  string
+	RedisAddr    string
+	RedisPass    string
+	JWTSecret    string
+	JWTHours     int
 	KafkaBrokers []string // 空 = 不启用 Kafka
 	KafkaTopic   string
+	RankingURL   string // 排行榜微服务，空则不反代
 }
 
 func Load() Config {
@@ -39,6 +40,7 @@ func Load() Config {
 		JWTHours:     hours,
 		KafkaBrokers: brokerList,
 		KafkaTopic:   getenv("KAFKA_TOPIC", "trades"),
+		RankingURL:   getenv("RANKING_URL", "http://127.0.0.1:8081"),
 	}
 }
 

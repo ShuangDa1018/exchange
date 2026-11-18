@@ -5,6 +5,8 @@ package api
 import (
 	"context"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -36,6 +38,26 @@ func New(ledger *account.Ledger, eng *engine.Engine, rdb *cache.Redis, authSvc *
 	s := &Server{ledger: ledger, engine: eng, rdb: rdb, auth: authSvc, router: r}
 	s.routes()
 	return s
+}
+
+func (s *Server) MountRankingProxy(target string) {
+	if target == "" {
+		return
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return
+	}
+	proxy := httputil.NewSingleHostReverseProxy(u)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`{"error":"排行榜服务不可用，请先启动: go run ./cmd/ranking"}`))
+	}
+	s.router.GET("/api/leaderboard", func(c *gin.Context) {
+		c.Request.Host = u.Host
+		proxy.ServeHTTP(c.Writer, c.Request)
+	})
 }
 
 func (s *Server) Engine() *gin.Engine { return s.router }
@@ -197,7 +219,7 @@ func corsMiddleware() gin.HandlerFunc {
 func rateLimitMiddleware(rdb *cache.Redis) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if rdb == nil || path == "/api/login" || path == "/api/register" {
+		if rdb == nil || path == "/api/login" || path == "/api/register" || path == "/api/leaderboard" {
 			c.Next()
 			return
 		}

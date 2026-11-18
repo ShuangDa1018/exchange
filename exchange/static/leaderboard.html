@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>排行榜 · BTC-USDT</title>
+  <style>
+    :root {
+      --bg: #f3f5f7;
+      --panel: #ffffff;
+      --ink: #14212b;
+      --muted: #6b7a86;
+      --line: #d9e0e6;
+      --buy: #0a7a52;
+      --sell: #c23b2e;
+      --accent: #1f4b63;
+      --gold: #c9a227;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "PingFang SC", "Noto Sans SC", sans-serif;
+      background:
+        linear-gradient(180deg, #e8eef2 0%, transparent 220px),
+        var(--bg);
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      padding: 28px 24px 12px;
+      max-width: 880px;
+      margin: 0 auto;
+    }
+    h1 { margin: 0; font-size: 28px; letter-spacing: -0.03em; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .nav { display: flex; gap: 8px; margin-top: 10px; }
+    .nav a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+    }
+    .nav a.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    main { max-width: 880px; margin: 0 auto; padding: 12px 24px 48px; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .panel h2 {
+      margin: 0;
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+    .tabs { display: flex; gap: 8px; }
+    .tabs button {
+      height: 34px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+    }
+    .tabs button.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .meta { color: var(--muted); font-size: 12px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      font-variant-numeric: tabular-nums;
+    }
+    th {
+      text-align: left;
+      color: var(--muted);
+      font-weight: 500;
+      padding: 8px 6px;
+      border-bottom: 1px solid var(--line);
+    }
+    td { padding: 10px 6px; border-bottom: 1px solid #eef2f5; }
+    tr.me td { background: #f3f8fb; font-weight: 600; }
+    .rank {
+      display: inline-flex;
+      width: 28px;
+      height: 28px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: #eef2f5;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .rank.r1 { background: #f6e7b2; color: #7a5b00; }
+    .rank.r2 { background: #e2e8ee; color: #3b4a56; }
+    .rank.r3 { background: #edd7c7; color: #6b3e22; }
+    .err { color: var(--sell); font-size: 13px; margin-top: 10px; min-height: 18px; }
+    .empty { color: var(--muted); padding: 24px 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>排行榜</h1>
+      <div class="sub">ranking 微服务消费 Kafka 成交，Redis ZSET 记分 · 总资产按最新成交价估值</div>
+      <div class="nav">
+        <a href="/">交易</a>
+        <a class="active" href="/leaderboard.html">排行榜</a>
+      </div>
+    </div>
+    <div class="meta" id="who"></div>
+  </header>
+  <main>
+    <section class="panel">
+      <div class="toolbar">
+        <div class="tabs">
+          <button class="active" data-sort="volume">成交额</button>
+          <button data-sort="equity">总资产</button>
+        </div>
+        <div class="meta" id="meta">加载中…</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>名次</th>
+            <th>用户</th>
+            <th>成交额 (USDT)</th>
+            <th>成交笔数</th>
+            <th>总资产 (USDT)</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="err" id="err"></div>
+    </section>
+  </main>
+  <script>
+    const API = location.origin.includes("5500") || location.protocol === "file:"
+      ? "http://localhost:8080"
+      : "";
+    let sort = "volume";
+    const me = localStorage.getItem("exchange_user") || "";
+    const $ = (id) => document.getElementById(id);
+    $("who").textContent = me ? ("当前登录 " + me) : "未登录（仍可看榜）";
+
+    function money(n) {
+      return Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    async function refresh() {
+      $("err").textContent = "";
+      try {
+        const res = await fetch((API || "") + "/api/leaderboard?sort=" + sort + "&limit=20");
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || "排行榜服务不可用");
+        $("meta").textContent = "最新价 " + money(data.last_price) + " USDT";
+        const rows = data.rows || [];
+        if (!rows.length) {
+          $("rows").innerHTML = `<tr><td colspan="5" class="empty">暂无数据。先开 ranking 微服务，并用 alice / bob 各下一笔成交单。</td></tr>`;
+          return;
+        }
+        $("rows").innerHTML = rows.map((r) => {
+          const cls = r.user_id === me ? "me" : "";
+          const medal = r.rank <= 3 ? " r" + r.rank : "";
+          return `<tr class="${cls}">
+            <td><span class="rank${medal}">${r.rank}</span></td>
+            <td>${r.user_id}${r.user_id === me ? " · 我" : ""}</td>
+            <td>${money(r.volume)}</td>
+            <td>${r.trades || 0}</td>
+            <td>${money(r.equity)}</td>
+          </tr>`;
+        }).join("");
+      } catch (e) {
+        $("err").textContent = e.message;
+        $("meta").textContent = "无法连接排行榜";
+      }
+    }
+
+    document.querySelectorAll(".tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        sort = btn.dataset.sort;
+        document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        refresh();
+      });
+    });
+
+    refresh();
+    setInterval(() => { if (!document.hidden) refresh(); }, 3000);
+  </script>
+</body>
+</html>

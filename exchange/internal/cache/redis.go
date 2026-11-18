@@ -2,9 +2,10 @@
 // 用途：热点余额缓存、简易 API 限流
 //
 // 标记约定：
-//   [Redis]         Redis 相关
-//   [Redis:READ]    读缓存
-//   [Redis:WRITE]   写缓存 / 限流计数
+//
+//	[Redis]         Redis 相关
+//	[Redis:READ]    读缓存
+//	[Redis:WRITE]   写缓存 / 限流计数
 package cache
 
 import (
@@ -41,6 +42,14 @@ func Open(addr, password string) (*Redis, error) {
 }
 
 func (r *Redis) Close() error { return r.client.Close() }
+
+// Client 暴露底层客户端，给 ranking 等下游复用同一连接参数
+func (r *Redis) Client() *redis.Client {
+	if r == nil {
+		return nil
+	}
+	return r.client
+}
 
 func balKey(userID string) string { return "bal:" + userID }
 

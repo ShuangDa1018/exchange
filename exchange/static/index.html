@@ -42,6 +42,25 @@
       letter-spacing: -0.03em;
     }
     .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .nav {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .nav a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+    }
+    .nav a.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
     .user-switch {
       display: flex;
       gap: 8px;
@@ -285,7 +304,11 @@
   <header>
     <div>
       <h1>BTC-USDT</h1>
-      <div class="sub">Gin · JWT · Postgres/Redis · 限价撮合 · 打开本页即前端</div>
+      <div class="sub">交易服务 :8080 · 排行榜微服务 :8081 · Postgres/Redis/Kafka</div>
+      <div class="nav">
+        <a class="active" href="/">交易</a>
+        <a href="/leaderboard.html">排行榜</a>
+      </div>
     </div>
     <div class="user-switch">
       <span id="auth-status" style="color:var(--muted)">未登录</span>

@@ -1,0 +1,8 @@
+services:
+  api:
+    build: ./backend
+    ports: ["8088:8088"]
+    environment:
+      HTTP_ADDR: ":8088"
+      ALLOW_ORIGINS: "http://localhost:5173,http://localhost:8080"
+    restart: unless-stopped

@@ -1,14 +1,16 @@
 // Package store：PostgreSQL 持久化（用户 / 余额 / 流水 / 订单 / 成交）
 //
 // 标记约定（全文可搜）：
-//   [DB]         Postgres 相关
-//   [DB:READ]    查询
-//   [DB:WRITE]   插入 / 更新
-//   [DB:MIGRATE] 迁移建表
+//
+//	[DB]         Postgres 相关
+//	[DB:READ]    查询
+//	[DB:WRITE]   插入 / 更新
+//	[DB:MIGRATE] 迁移建表
 //
 // SQL 文件：
-//   migrations/*.sql     改表结构
-//   store/queries/*.sql  日常增删改查（本包 embed）
+//
+//	migrations/*.sql     改表结构
+//	store/queries/*.sql  日常增删改查（本包 embed）
 package store
 
 import (
@@ -50,6 +52,19 @@ func Open(ctx context.Context, databaseURL string, migrationsFS fs.FS) (*DB, err
 }
 
 func (db *DB) Close() { db.pool.Close() }
+
+// OpenReadOnly [DB] 只连库、不跑 migrations（给 ranking 等下游微服务回放成交/余额）
+func OpenReadOnly(ctx context.Context, databaseURL string) (*DB, error) {
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("连接 Postgres: %w", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("Ping Postgres: %w", err)
+	}
+	return &DB{pool: pool}, nil
+}
 
 type BalanceRow struct {
 	UserID    string
